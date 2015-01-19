@@ -16,6 +16,7 @@ ssh -L 5901:192.168.2.101:5900 root@192.168.2.100     #通过本地5901端口的
 
 ##### 远程端口转发
 ###### 反向端口映射。
+
 ```
 ssh -R <local port>:<remote host>:<remote port> <SSH hostname>
 ssh -R 5900:192.168.2.100:5901 root@192.168.2.100   #访问远程192.168.2.100:5901端口的数据经由192.168.2.100转发给本地5900服务
@@ -36,11 +37,12 @@ AllowTcpForwarding no
 ```
 
 ##### X协议转发
-···
+
+```
 export DISPLAY=<X Server IP>:<display #>.<virtual #>
 export DISPLAY=myDesktop:1.0                              #指定后续运行X应用界面在myDesktop主机显示
-···
+```
 
-···
+```
 ssh -X <SSH Server>                                       #通过ssh隧道转发X协议到ssh server机器
-···
+```
