@@ -1,7 +1,7 @@
 ```
 linux系统随机数的相关知识：
 1、linux系统中包含两类随机数生成器：/dev/random、/dev/urandom。各语言中的随机数函数均与其有关。
-2、使用/dev/random生成随机数时依赖于“熵池”，熵池空，则随机数函数调用将组撒i；/dev/urandom则不会阻塞。
+2、使用/dev/random生成随机数时依赖于“熵池”，熵池空，则随机数函数调用将阻塞；/dev/urandom则不会阻塞。
 3、熵池实际上是从各种noice source中获取数据，noice source可能是 键盘事件、鼠标事件、设备时钟中等。
 4、linux2.6内核废弃了一些noice source，所以相比2.4内核，熵池更容易发生不够用导致阻塞的情况。
 5、使用watch cat /proc/sys/kernel/random/entropy_avail监控线上生成机器实际熵池基本维持在100-200之间一个很小的范围。
