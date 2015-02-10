@@ -25,7 +25,7 @@ awk 'BEGIN{
    print "unordered";
 
    for(i in array){                      #for in循环无序访问
-       split(i, array2, SUBSEP);         #使用SUBSEP分隔数组下标
+       split(i, array2, SUBSEP);         #使用 SUBSEP "\034" 分隔数组下标
        print array2[1]" * "array2[2]" = " array[i];
    }
 }'
