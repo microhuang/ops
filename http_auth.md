@@ -7,7 +7,7 @@ digest auth
     auth_digest_user_file /etc/nginx/htpasswd.digest;
 ```
 ```
-cat /opt/molbase.inc/etc/nginx/htpasswd.digest
+cat /etc/nginx/htpasswd.digest
 admin:Password please:cf36ee2d45938910f16bfa1704a53f20
 ```
 ```
