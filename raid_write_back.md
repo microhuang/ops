@@ -1,0 +1,1 @@
+硬件RAID卡通常提供电池备份，配合write back写入cache可以极大提高写入性能。
