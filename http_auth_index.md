@@ -42,10 +42,10 @@ server {
     error_log  /var/log/nginx/idc.error.log;
 
     auth_digest           "Password please";
-    auth_digest_user_file /opt/molbase.inc/etc/nginx/htpasswd.digest;
+    auth_digest_user_file /etc/nginx/htpasswd.digest;
     auth_digest_expires   30s;
     #auth_basic            "Password please";
-    #auth_basic_user_file  /opt/molbase.inc/etc/nginx/htpasswd;
+    #auth_basic_user_file  /etc/nginx/htpasswd;
 
     location /{
         autoindex on;
