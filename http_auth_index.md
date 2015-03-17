@@ -50,7 +50,7 @@ server {
     location /{
         autoindex on;
         autoindex_localtime on;
-        index xugouwenjianming.html;
+        index xugouwenjianming.html;      #避免默认文件存在致使( -f $request_filename )判断错误
 #        if ( -f $request_filename/index.html ) {
 #           add_header Content-Type "text/plain;charset=utf-8";
 #           return 200 "index file exists";
