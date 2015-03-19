@@ -50,12 +50,16 @@ server {
     location /{
         autoindex on;
         autoindex_localtime on;
+#       add_header Content-Type "text/plain;charset=utf-8";
+#       return 200 "index file exists";   #-f前的值不包括index文件名
         index xugouwenjianming.html;      #避免默认文件存在致使( -f $request_filename )判断错误
 #        if ( -f $request_filename/index.html ) {
 #           add_header Content-Type "text/plain;charset=utf-8";
 #           return 200 "index file exists";
 #       }
         if ( -f $request_filename ) {
+#           add_header Content-Type "text/plain;charset=utf-8";
+#           return 200 "index file exists";  #-f后的值包括了index文件名
             return 403;
         }
     }
