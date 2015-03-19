@@ -57,7 +57,7 @@ server {
 #           add_header Content-Type "text/plain;charset=utf-8";
 #           return 200 "index file exists";
 #       }
-        if ( -f $request_filename ) {
+        if ( -f $request_filename ) {      #-f -d -e -x由rewrite模块处理
 #           add_header Content-Type "text/plain;charset=utf-8";
 #           return 200 "index file exists";  #-f后的值包括了index文件名
             return 403;
