@@ -65,3 +65,11 @@ server {
     }
 }
 ```
+
+module顺序
+```
+autoindex
+index
+rewrite
+    -f、-d、-e、-x属于rewrite模块，执行此指令时index已经执行过，所以会导致request_file的变化，但在此之前，比如autoindex阶段，则request_file是不会附加index信息的。
+```
