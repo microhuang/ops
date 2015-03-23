@@ -35,7 +35,8 @@ demo
 server {
     listen 80;
     server_name idc.localhost.dev;
-    root /var/www/http/;
+    
+    root /var/www/http/;                  #若无root指令，可能报告：testing "/etc/nginx/html" existence failed (2: No such file or directory) while logging request
 
     include /etc/nginx/date.var;
     access_log /var/log/nginx/idc.$date.log;
