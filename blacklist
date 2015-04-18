@@ -1,0 +1,667 @@
+#!/usr/bin/perl -wT
+#
+# blacklist - IP blacklisting utility (using iptables or pf)
+# Apache httpd Tools, http://www.apachesecurity.net/tools/
+#
+# Copyright (C) 2004,2005 Ivan Ristic <ivanr@webkreator.com>
+# Copyright (C) 2005 Tomoyuki Sakurai <trombik@gentoo.gr.jp>
+#
+# $Id: blacklist,v 1.7 2005/12/04 11:30:04 ivanr Exp $
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, version 2.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+#
+
+# This script maintains a list of IP addresses that are not
+# to be allowed through the iptables firewall. To use the
+# script to the following:
+#
+# 1) Configure the blacklist script with the proper data
+#    path (variable $DATA). Specify "iptables" or "pfctl"
+#    in $FWCMD.
+#
+# 2) For iptables users:
+#
+#    Create a new iptables chain and configure iptables
+#    to forward traffic to it selectively. The example
+#    below sends port 80 traffic to the blaclist. The
+#    chain will return the control back to the INPUT
+#    chain.
+#
+#    iptables -N BLACKLIST
+#    iptables -A INPUT -p tcp --dport 80 -j BLACKLIST
+#
+#	 For pf users:
+#
+#	 Define blacklist table in pf.conf. Create deny rule if
+#    src address is found in the table. $ext_if is your
+#  	 external network interface.
+#
+#    table <blacklist>
+# 	 block in quick on $ext_if inet proto tcp \
+#        from <blacklist> to ($ext_if) port www
+#
+#	 Run "pfctl -t blacklist -T show" to list the table
+# 	 content. Reload pf.conf by executing
+#    "pfctl -f /etc/pf.conf".
+#   
+# 3) Configure blacklist to be initialized at boot time:
+#
+#    blacklist start
+#
+# 4) Call blacklist to remove stale blocks from the
+#    firewall every couple of minutes:
+#
+#    blacklist unblock_stale
+#
+# 5) To block an IP address use the block command together
+#    with the duration (in seconds) of the block:
+#
+#    blacklist block 192.168.0.1 60
+#
+# 6) To unblock an IP address:
+#
+#    blacklist unblock 192.168.0.1
+#
+# Note: This script is not meant to be used suid. Whoever
+#       is invoking it should already have enough privileges
+#       to work with iptables
+
+# TODO Add a whitelist
+#
+# TODO Allow a range of addresses to be blocked
+#
+# TODO Allow multiple IP addresses (or ranges) to be blocked
+#      or unblocked at once
+#
+# TODO full IPv6 support (ip6tables)
+
+use Cwd "realpath";
+use Fcntl qw(:DEFAULT :flock);
+use IO::Handle;
+use Sys::Syslog qw(:DEFAULT setlogsock);
+use strict;
+
+
+my $FWCMD = "pfctl";       # iptables or pfctl
+# TODO ip6tables support
+my $IPT = "/sbin/iptables";
+my $CHAIN = "BLACKLIST";
+my $PFCTL = "/sbin/pfctl";
+
+# the name of pf table
+# block in quick on $ext_if inet proto tcp \
+#   from <blacklist> to ($ext_if) port www
+my $TABLE = "blacklist"; 
+
+my $DATA = "/etc/blacklist.dat";
+my $USAGE = "Usage: blacklist [start | stop | reload | status | clear | block <ip> <duration> | unblock <ip> | unblock_stale | fromfile <filename>]\n";
+
+# Change path below to a place where only trusted users can write
+# and uncomment to activate execution serialisation
+# my $LOCKFILE = "/tmp/blacklist.lock";
+my $LOCKFILE;
+
+# do we log to syslog?
+my $LOG = 1;
+
+# do we want to print out the commands we execute?
+my $DEBUG = 1;
+
+# first attempt to use strict
+my $LOCKFILE_FH;
+my %data;
+my %FILES_ALREADY_READ = ();
+
+# for taint mode
+$ENV{PATH} = "/sbin:/bin:";
+
+sub create_lock {
+    if (defined($LOCKFILE)) {
+        sysopen($LOCKFILE_FH, $LOCKFILE, O_RDONLY | O_CREAT) || die("Could not open file: $LOCKFILE\n");
+        flock($LOCKFILE_FH, 2) || die("Unable to lock file: $LOCKFILE\n");
+    }
+}
+
+sub remove_lock {
+    if (defined($LOCKFILE)) {
+        close($LOCKFILE_FH);
+    }
+}
+
+sub load_data {
+    %data = ();
+
+    sysopen(FILE, $DATA, O_RDWR | O_CREAT) || die("Cannot open/create file $DATA");
+    flock(FILE, LOCK_SH) || die("Cannot lock (shared) file $DATA");
+
+    while(<FILE>) {
+        chomp;
+        my(@list) = split;
+        if (@list == 3) {
+            my($ip, $start_time, $duration) = @list;
+			# validate IP address
+			# convert "ip.add.re.ss" to "ip.add.re.ss/32" for backward compatibility
+			if ( my $valid = is_valid_ipv4($ip) || is_valid_ipv6($ip) ) {
+				$valid =~ /(.*)/;
+				$ip = $1;
+			}
+			else {
+				log_warn("ignoring invalid IP address : $ip");
+				next;
+			}
+            # print("ip=$ip, start_time=$start_time, duration=$duration\n");
+            my(%iphash) = ();
+            $iphash{"ip"} = $ip;
+            $iphash{"start_time"} = $start_time;
+            $iphash{"duration"} = $duration;
+            $data{$ip} = \%iphash;
+        }
+    }
+}
+
+sub save_data {
+    flock(FILE, LOCK_EX) || die("Cannot lock (exclusive) file $DATA");
+    seek(FILE, 0, 0) || die("Cannot seek in file $DATA");
+    truncate(FILE, 0) || die("Cannot truncate file $DATA");
+    while(my($ip, $ref) = each %data) {
+        print FILE "$ip " . ${$ref}{"start_time"} . " " . ${$ref}{"duration"} . "\n";
+    }
+    close(FILE);
+}
+
+sub add_ip_to_data {
+    my($ip, $duration) = @_;
+    my($existed) = 0;
+
+    if (exists $data{$ip}) {
+        $existed = 1;
+    }
+
+    my %iphash = ();
+    $iphash{"ip"} = $ip;
+    $iphash{"start_time"} = time();
+    $iphash{"duration"} = $duration;
+    $data{$ip} = \%iphash;
+
+    return $existed;
+}
+
+sub delete_ip_from_data {
+    my($ip) = @_;
+
+    if (exists $data{$ip}) {
+        delete $data{$ip};
+        return 1;
+    }
+    return 0;
+}
+
+# add_deny_rule($ip);
+# add $ip to chain or table
+sub add_deny_rule {
+    my ($ip, $unknown) = @_;
+
+	if ($unknown) {
+		log_warn("add_deny_rule() : extra argment passed : $unknown");
+	}
+	if ( my $valid = is_valid_ipv4($ip) || is_valid_ipv6($ip) ) {
+		# for taint mode
+		$valid =~ /(.*)/; # Yes, I know what I'm doing
+		$ip = $1;
+	}
+	else {
+		log_err("add_deny_rule: $ip is not a valid IP address");
+		die "add_deny_rule: $ip is not a valid IP address";
+	}
+    my ($cmd);
+    if ($FWCMD =~ /^iptables$/i) {
+        $cmd = "$IPT -I $CHAIN -s $ip -j DROP";
+    }
+    elsif ($FWCMD =~ /^pfctl$/i) {
+        # NOTE: pf accepts CIDR notation.
+        $cmd = "$PFCTL -t $TABLE -T add $ip";
+    }
+    else {
+        log_crit("No firewall command is specified!");
+        return 1;
+    }
+    if ($DEBUG) {
+        print("$cmd\n");
+    }
+    my $rv = system($cmd);
+	if ($rv == -1) {
+		log_crit("cannot exec $cmd : $!");
+	}
+	elsif (($rv >> 8) != 0) {
+		log_crit("command $cmd exited with ", $rv >> 8);
+	}
+	print (($rv >> 8) . "\n") if $DEBUG;
+	return ($rv >> 8);
+}
+
+# remove_deny_rule($ip);
+# remove $ip from chain or table
+sub remove_deny_rule {
+    my ($ip, $unknown) = @_;
+	if ( $unknown ) {
+		log_warn("remove_deny_rule() : extra arg passed : $unknown")
+	}
+	if ( my $valid = is_valid_ipv4($ip) || is_valid_ipv6($ip) ){
+		# for taint mode
+		$valid =~ /(.*)/;
+		$ip = $1;
+	}
+	else {
+		log_err("remove_deny_rule: $ip is not a valid IP address");
+		die "remove_deny_rule: $ip is not a valid IP address\n";
+	}
+    my ($cmd);
+	# TODO
+	# use subroutine ref. instead of if/elsif
+    if ($FWCMD =~ /^iptables$/i) {
+        $cmd = "$IPT -D $CHAIN -s $ip -j DROP";
+    }
+    elsif ($FWCMD =~ /^pfctl$/i) {
+        $cmd = "$PFCTL -t $TABLE -T delete $ip";
+    }
+    else {
+        log_crit("No firewall command is specified!");
+        return 1;
+    }
+    if ($DEBUG) {
+        print("$cmd\n");
+    }
+    my $rv = system($cmd);
+	if ( $rv == -1 ) {
+		log_crit("cannot exec $cmd : $!");
+	}
+	elsif ( $rv >> 8 != 0 ) {
+		log_crit("command $cmd exited with ", $rv >> 8);
+	}
+	return $rv >> 8;
+}
+
+# flush_rules()
+# flush chain or table
+sub flush_rules {
+    my ($cmd);
+	# TODO
+	# use subroutine ref. instead of if/elsif
+    if ($FWCMD =~ /^iptables$/i) {
+        $cmd = "$IPT -F $CHAIN";
+    } elsif ($FWCMD =~ /^pfctl$/i) {
+        $cmd = "$PFCTL -t $TABLE -Tflush";
+    } else {
+        log_crit("No firewall command is specified!");
+        return 1;
+    }
+    if ($DEBUG) {
+        print "$cmd\n";
+    }
+    my $rv = system($cmd);
+	if ($rv == -1) {
+		log_crit("cannot exec $cmd : $!");
+	}
+	elsif (($rv >> 8) != 0 ) {
+		log_crit("command $cmd exited with ", $rv >> 8);
+	}
+    # pf's tables are defined in pf.conf
+    if ($FWCMD =~ /^iptables$/i) {
+        $cmd = "$IPT -A $CHAIN -j RETURN";
+        if ($DEBUG) {
+            print "$cmd\n";
+        }
+        $rv = system($cmd);
+		if ($rv == -1) {
+			log_crit("cannot exec $cmd : $!");
+		}
+		elsif (($rv >> 8) != 0 ) {
+			log_crit("command $cmd exited with ", $rv >> 8);
+		}
+    }
+}
+
+sub do_block {
+    my($ip, $duration) = @_;
+
+    if ( my $valid = is_valid_ipv4($ip) || is_valid_ipv6($ip) ) {
+		$valid =~ /(.*)/;
+		$ip = $1;
+	}
+	else {
+		log_err("$ip is not a valid IP address ");
+        die("$ip is not a valid IP address\n");
+    }
+
+    if ($duration !~ m/^\d+$/) {
+		log_err("$duration is not a valid duration");
+        die("$duration is not a valid duration");
+    }
+
+    load_data();
+
+    if (add_ip_to_data($ip, $duration) == 0) {
+        save_data();
+        add_deny_rule($ip);
+		log_info("Blocking $ip for $duration seconds");
+    } else {
+        # no need to save anything (the address was
+        # already on the list) just close the file
+        close(FILE);
+    }
+}
+
+sub do_fromfile {
+    my($filename) = @_;
+
+    # check for recursion
+    $filename = realpath($filename);
+    if (exists $FILES_ALREADY_READ{$filename}) {
+        print STDERR "fromfile: Recursion not allowed. File already processed: $filename\n";
+        return -1;
+    }
+    $FILES_ALREADY_READ{$filename} = 1;
+
+    # open and process the file
+    open(my $fh, "<$filename") || die("Unable to open file: $filename");
+    while(my $line = <$fh>) {
+        chomp($line);
+        my @args = split(/ /, $line);
+        if (do_command_line(@args) == -1) {
+            close($fh);
+            return -1;
+        }
+    }
+    close($fh);
+    return 1;
+}
+
+sub do_unblock {
+    my($ip) = @_;
+
+    if ( my $valid = is_valid_ipv4($ip) || is_valid_ipv6($ip) ) {
+		$valid =~ /(.*)/;
+		$ip = $1;
+	}
+	else {
+		log_err("$ip is not a valid IP address");
+        die("$ip is not a valid IP address");
+    }
+
+    load_data();
+    my($existed) = delete_ip_from_data($ip);
+    if ($existed) {
+        save_data();
+        remove_deny_rule($ip);
+		log_info("Unblocked $ip (manual)");
+    } else {
+        log_info("Asked to unblock $ip but it was not on the list");
+    }
+}
+
+sub do_unblock_stale {
+    my($time_now) = time();
+    my %unblock_data = ();
+    load_data();
+
+    while(my ($ip, $ref) = each %data) {
+        my($expire_time) = ${$ref}{"start_time"} + ${$ref}{"duration"};
+        # print "time_now=$time_now, expire_time=$expire_time\n";
+        if ($time_now > $expire_time) {
+            delete_ip_from_data($ip);
+            $unblock_data{$ip} = $ref;            
+        }
+    }
+    save_data();
+
+    while(my($ip, $ref) = each %unblock_data) {
+        remove_deny_rule($ip);
+		log_info("Unblocked $ip (expired)");
+    }
+}
+
+sub do_start {
+    my($time_now) = time();
+    load_data();
+
+    flush_rules();
+    while(my($ip, $ref) = each %data) {
+        # print "$ip " . ${$ref}{"start_time"} . " " . ${$ref}{"duration"} . "\n";
+        my($expire_time) = ${$ref}{"start_time"} + ${$ref}{"duration"};
+        # print "time_now=$time_now, expire_time=$expire_time\n";
+        if ($time_now > $expire_time) {
+            delete_ip_from_data($ip);
+        } else {
+            add_deny_rule($ip);
+            {
+                my($duration) = $expire_time - $time_now;
+                log_info("Blocking $ip for $duration seconds");
+            }
+        }
+    }    
+
+    save_data();
+}
+
+sub do_stop {
+    flush_rules();
+}
+
+sub do_status {
+    my($time_now) = time();
+    load_data();
+
+	my $format = "%-43s\t%-28s\t%8d\t%8d\n";
+    printf "%-43s\t%-28s\t%8s\t%8s\n",
+		"ip", "blocking", "since", "duration", "remains";
+    while(my ($ip, $ref) = each %data) {
+        my($time_left) = (${$ref}{"start_time"} + ${$ref}{"duration"}) - $time_now;
+        printf $format,
+			$ip, scalar localtime(${$ref}{"start_time"}), ${$ref}{"duration"}, $time_left;
+    }
+}
+
+sub do_clear {
+    # clear current firewall configuration
+    do_stop();
+
+    # clear persistent data
+    load_data();
+    %data = ();
+    save_data();
+}
+
+sub do_command_line {
+    my($command) = shift(@_);
+
+    if (($command eq "start")||($command eq "reload")) {
+        return do_start();
+    } elsif ($command eq "status") {
+        return do_status();
+    } elsif ($command eq "stop") {
+        return do_stop();
+    } elsif ($command eq "clear") {
+        return do_clear();
+    } elsif ($command eq "unblock_stale") {
+        return do_unblock_stale();
+    } elsif ($command eq "block") {
+        if (@_ == 2) {
+            return do_block(@_);
+        } else {
+            print STDERR "Command 'block' needs two parameters\n";
+            return -1;
+        }
+    } elsif ($command eq "unblock") {
+        if (@_ == 1) {
+            return do_unblock(@_);
+        } else {
+            print STDERR "Command 'unblock' needs one parameter\n";
+            return -1;
+        }
+    } elsif ($command eq "fromfile") {
+        if (@_ == 1) {
+            return do_fromfile(@_);
+        } else {
+            print STDERR "Command 'fromfile' needs one parameter\n";
+            return -1;
+        }
+    } else {
+        print STDERR "Unknown command: $command\n";
+        return -1;
+    } 
+
+    return 1;
+}
+
+# a wrapper function for syslog, use log_PRI(@texts) below.
+# log single line of @texts to syslog
+sub log_syslog {
+	return unless $LOG;
+	my ($priority, @texts) = @_;
+	foreach (@texts) { chomp; };
+	my $text = "@texts";
+	# if ( $LOG_TO_FILE ) {
+	#	$text = "$priority: $text";
+	#	log_file($text);
+	# }
+	syslog($priority, $text);
+}
+
+sub log_debug {
+	log_syslog('debug', @_);
+}
+
+sub log_info {
+	log_syslog('info', @_);
+}
+
+sub log_notice {
+	log_syslog('notice', @_);
+}
+
+sub log_warning {
+	log_syslog('warning', @_);
+}
+# alias
+sub log_warn {
+	log_warning(@_);
+}
+
+sub log_err {
+	log_syslog('err', @_);
+}
+
+sub log_crit {
+	log_syslog('crit', @_);
+}
+
+sub log_alert {
+	log_syslog('alert', @_);
+}
+
+sub log_emerg {
+	log_syslog('emerg', @_);
+}
+
+# is_valid_ipv{4,6} validiate given addr.
+# if user input is single IPv4 address only, no additional module required
+# CIDR and IPv6 support require Net::IP
+
+# return IPv4 addr if given addr is valid IPv4 addr
+# is_valid_ipv4("10.0.0.1")    returns "10.0.0.1/32", and doesn't require Net::IP
+# is_valid_ipv4("10.0.0.1/32") returns "10.0.0.1/32", and doesn't requires Net::IP
+# is_valid_ipv4("10.0/32")     returns "10.0.0.0/32", and requires Net::IP
+# is_valid_ipv4("10/8")        returns "10.0.0.0/8",  and requires Net::IP
+sub is_valid_ipv4 {
+	my $given_addr = shift;
+	# sigle IPv4 addr
+	# shamelessly obtained from Regexp::Common
+	my $valid_ipv4_re = qr/(?:(?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2})[.](?:25[0-5]|2[0-4][0-9]|[0-1]?[0-9]{1,2}))/;
+	if ( $given_addr =~ /^$valid_ipv4_re$/ ) {
+		return "$given_addr/32";
+	}
+	else {
+		if ( $given_addr =~ m#/\d{1,2}$# ) {
+			# looks like CIDR
+
+			# but if $given_addr is ip.add.re.ss/32, don't bother to load addtional module
+			if ( $given_addr =~ /^$valid_ipv4_re\/32$/ ) {
+				return $given_addr;
+			}
+			unless ( eval "require Net::IP") {
+				# load module Net::IP if and only if needed
+				log_warn("cannot load Net::IP module while parsing $given_addr");
+				log_warn("CIDR support requires Net::IP");
+				die "cannot load required module Net::IP\n";
+			}
+			my $ip = Net::IP->new($given_addr)
+				or return 0;
+			return $ip->ip . "/" . $ip->prefixlen;
+		}
+		else {
+			return 0;
+		}
+	}
+	die "NOT REACHED";
+}
+
+# return IPv6 addr if given addr is valid IPv6 addr. else 0
+# always require Net::IP, other than that, same as is_valid_ipv4
+# is_valid_ipv6("aaaa:bbbb:cccc::xxxx:yyyy:zzzz") returns
+# "aaaa:bbbb:cc:0000:0000:xxxx:yyyy:zzzz/128"
+sub is_valid_ipv6 {
+    my $given_addr = shift;
+	unless ( eval "require Net::IP") {
+		# IPv6 support requires module Net::IP
+		log_warn("cannot load Net::IP module");
+		log_warn("IPv6 support requires Net::IP");
+		die "cannot load required module Net::IP\n";
+	}
+	my $ip = Net::IP->new($given_addr)
+		or return 0;
+	if ( $ip->version == 6 ) {
+		if ( $given_addr =~ m#/\d{1,3}$# ) {
+			# should be in short format?
+			# return $ip->short . "/" . $ip->prefixlen;
+			return $ip->ip . "/" . $ip->prefixlen;
+		}
+		else {
+			# without prefix
+			return $ip->ip . "/128";
+		}
+	}
+	# not IPv6
+	else {
+		return 0;
+	}
+	die "NOT REACHED";
+}
+# -- main ---------------------------------------------------
+
+if (@ARGV == 0) {
+    print $USAGE;
+    exit();
+}
+
+create_lock();
+
+if ($LOG) {
+    openlog("blacklist", "cons,pid");
+    setlogsock('unix');
+}
+
+do_command_line(@ARGV);
+
+remove_lock();
+
