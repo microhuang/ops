@@ -4,7 +4,7 @@
  */
 function genknuth($m,$n){
         for($i=0;$i<$n;$i++){
-                if(mt_rand()%($n-$i)<$m){
+                if(mt_rand()%($n-$i)<$m){  //rand() % n < m表示概率m/n
                         echo $i;
                         $m--;
                 }
