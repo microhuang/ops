@@ -4,7 +4,7 @@
  */
 function genknuth($m,$n){
         for($i=0;$i<$n;$i++){
-                if(rand()%($n-$i)<$m){
+                if(mt_rand()%($n-$i)<$m){
                         echo $i;
                         $m--;
                 }
