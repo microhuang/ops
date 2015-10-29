@@ -10,5 +10,6 @@ function vudate($format, $utimestamp = null)
     return $date;
 }
 
-echo vudate('Y-m-d H:i:s.u',microtime(true));
-echo "\n";exit;
+//echo vudate('Y-m-d H:i:s.u',time());
+//echo vudate('Y-m-d H:i:s.u',microtime(true));
+//echo "\n";exit;
