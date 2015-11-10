@@ -14,3 +14,10 @@ http://www.laruence.com/2012/09/24/2810.html
 
 大量使用随机数的业务，可能需要关注熵池不足导致的调用阻塞。
 ```
+
+
+```
+cat /proc/sys/kernel/random/uuid                      #从内核拿
+head -200 /dev/urandom | cksum | cut -f1 -d" "        #从设备拿
+echo $RANDOM                                          #从系统变量拿
+```
