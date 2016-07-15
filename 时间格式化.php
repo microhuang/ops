@@ -1,4 +1,8 @@
 <?php
+//restore_error_handler();  //set_error_handler后，display_errors不起作用
+//error_reporting(E_ALL);
+//ini_set('display_errors',1);
+
 function vudate($format, $utimestamp = null)
 {
     if (is_null($utimestamp))
